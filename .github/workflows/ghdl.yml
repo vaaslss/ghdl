@@ -1,0 +1,208 @@
+name: ghdl
+
+# Trigger: commit message containing docker:// or http(s):// URLs
+# Examples:
+#   git commit -am "https://example.com/file.zip"
+#   git commit -am "docker://ubuntu:22.04"
+#   git commit -am "https://youtu.be/dQw4w9WgXcQ"
+#   git commit -am "docker://nginx:latest https://example.com/data.tar"
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  download:
+    # Skip commits we generated ourselves
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ── 1. Checkout with full history so we can push to other branches ──────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Detect whether this commit contains any download targets ──────────
+      - name: Detect targets
+        id: detect
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          if echo "$MSG" | grep -qP '(docker://|https?://)'; then
+            echo "has_targets=true"  >> $GITHUB_OUTPUT
+          else
+            echo "has_targets=false" >> $GITHUB_OUTPUT
+          fi
+          echo "Commit message: $MSG"
+
+      # ── 3. Install tools ─────────────────────────────────────────────────────
+      - name: Install tools
+        if: steps.detect.outputs.has_targets == 'true'
+        run: |
+          sudo apt-get install -y aria2 zip
+          pip install -q yt-dlp
+
+      # ── 4. Download everything ───────────────────────────────────────────────
+      - name: Download
+        if: steps.detect.outputs.has_targets == 'true'
+        run: |
+          set -euo pipefail
+
+          MSG=$(git log -1 --pretty=%B)
+          TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+          OUTDIR="/tmp/ghdl/$TIMESTAMP"
+          WORKDIR="/tmp/ghdl_work"
+          mkdir -p "$OUTDIR" "$WORKDIR"
+
+          # Files larger than 90 MB are split so GitHub accepts them.
+          # Split parts use zip's native split format (reassemble with: zip -s 0 file.zip --out full.zip && unzip full.zip)
+          SPLIT_LIMIT=$((90 * 1024 * 1024))
+
+          split_or_copy() {
+            local src="$1"
+            local dst_dir="$2"
+            local size base
+            size=$(stat -c%s "$src")
+            base=$(basename "$src")
+            if [ "$size" -gt "$SPLIT_LIMIT" ]; then
+              echo "✂️  $base is $(( size / 1024 / 1024 )) MB — splitting into 90 MB parts"
+              zip -s 90m "$dst_dir/${base}.zip" -j "$src"
+              echo "   Parts: $(ls "$dst_dir/${base}"* 2>/dev/null | wc -l)"
+            else
+              cp "$src" "$dst_dir/$base"
+            fi
+          }
+
+          # Returns 0 if the URL looks like a media/video URL handled by yt-dlp
+          is_media_url() {
+            echo "$1" | grep -qiP \
+              '(youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com|twitch\.tv|tiktok\.com|\
+instagram\.com|facebook\.com|fb\.watch|twitter\.com|x\.com|reddit\.com|bilibili\.com|\
+vk\.com|vkvideo\.ru|rutube\.ru|streamable\.com|odysee\.com|rumble\.com|kick\.com|\
+ok\.ru|weibo\.com|douyin\.com|afreecatv\.com|\
+\.(mp4|mkv|webm|flv|avi|mov|m3u8)(\?|$))'
+          }
+
+          # ── Docker images (docker://image:tag) ───────────────────────────────
+          while IFS= read -r DOCKER_URL; do
+            IMAGE="${DOCKER_URL#docker://}"
+            [ -z "$IMAGE" ] && continue
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🐳 Docker pull: $IMAGE"
+            docker pull "$IMAGE"
+
+            SAFE=$(echo "$IMAGE" | tr '/:.' '___')
+            TARFILE="$WORKDIR/docker_${SAFE}.tar.gz"
+            echo "💾 Saving image as tar.gz …"
+            docker save "$IMAGE" | gzip > "$TARFILE"
+            echo "   Raw size: $(( $(stat -c%s "$TARFILE") / 1024 / 1024 )) MB"
+
+            split_or_copy "$TARFILE" "$OUTDIR"
+            rm -f "$TARFILE"
+          done < <(echo "$MSG" | grep -oP 'docker://\S+' || true)
+
+          # ── HTTP/HTTPS URLs ──────────────────────────────────────────────────
+          while IFS= read -r RAW_URL; do
+            # Strip trailing punctuation that might come from prose
+            URL=$(echo "$RAW_URL" | sed 's/[.,;:!?)]+$//')
+            [ -z "$URL" ] && continue
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            if is_media_url "$URL"; then
+              # ── Media / video via yt-dlp ─────────────────────────────────────
+              echo "🎬 yt-dlp: $URL"
+              YTDIR="$WORKDIR/yt"
+              mkdir -p "$YTDIR"
+              yt-dlp \
+                -f "bestvideo+bestaudio/best" \
+                --merge-output-format mp4 \
+                --no-playlist \
+                -o "$YTDIR/%(title)s.%(ext)s" \
+                "$URL" || { echo "⚠️  yt-dlp failed for $URL — skipping"; continue; }
+
+              for F in "$YTDIR"/*; do
+                [ -f "$F" ] || continue
+                split_or_copy "$F" "$OUTDIR"
+                rm -f "$F"
+              done
+            else
+              # ── Generic file via aria2c ──────────────────────────────────────
+              echo "⬇️  aria2c: $URL"
+              DLDIR="$WORKDIR/dl"
+              mkdir -p "$DLDIR"
+              aria2c \
+                --split=16 \
+                --max-connection-per-server=16 \
+                --min-split-size=5M \
+                --console-log-level=notice \
+                --summary-interval=0 \
+                -d "$DLDIR" \
+                "$URL" || { echo "⚠️  aria2c failed for $URL — skipping"; continue; }
+
+              for F in "$DLDIR"/*; do
+                [ -f "$F" ] || continue
+                split_or_copy "$F" "$OUTDIR"
+                rm -f "$F"
+              done
+              rm -rf "$DLDIR"
+            fi
+          done < <(echo "$MSG" | grep -oP 'https?://\S+' || true)
+
+          # ── Verify we produced something ─────────────────────────────────────
+          FILE_COUNT=$(find "$OUTDIR" -type f | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "⚠️  No files were downloaded — nothing to commit."
+            echo "has_files=false" >> $GITHUB_ENV
+          else
+            echo "✅ Downloaded $FILE_COUNT file(s):"
+            ls -lh "$OUTDIR"
+            echo "has_files=true"    >> $GITHUB_ENV
+          fi
+
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "OUTDIR=$OUTDIR"       >> $GITHUB_ENV
+
+      # ── 5. Push downloaded files to the `downloads` branch ──────────────────
+      - name: Push to downloads branch
+        if: steps.detect.outputs.has_targets == 'true' && env.has_files == 'true'
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # Use or create the `downloads` branch (orphan = no code history)
+          if git ls-remote --exit-code --heads origin downloads &>/dev/null; then
+            git fetch origin downloads
+            git checkout downloads
+            git pull --ff-only origin downloads
+          else
+            echo "📌 Creating orphan 'downloads' branch"
+            git checkout --orphan downloads
+            git rm -rf . --quiet 2>/dev/null || true
+            git clean -fd --quiet  2>/dev/null || true
+          fi
+
+          # Each run gets its own timestamped folder
+          DEST="$TIMESTAMP"
+          mkdir -p "$DEST"
+          cp -r "$OUTDIR/." "$DEST/"
+
+          # Write a small manifest
+          {
+            echo "source_branch: ${{ github.ref_name }}"
+            echo "trigger_commit: ${{ github.sha }}"
+            echo "commit_message: |"
+            git log -1 --pretty=%B "${{ github.sha }}" | sed 's/^/  /'
+            echo "files:"
+            find "$DEST" -type f | sort | sed 's/^/  - /'
+          } > "$DEST/manifest.yml"
+
+          git add "$DEST/"
+          git commit -m "📦 $TIMESTAMP — ${{ github.ref_name }} [skip ci]" \
+            || { echo "Nothing to commit"; exit 0; }
+          git push origin downloads
+          echo ""
+          echo "✅ Files saved to branch 'downloads/$TIMESTAMP'"
