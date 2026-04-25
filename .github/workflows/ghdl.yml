@@ -147,6 +147,7 @@ jobs:
                 pacman -Su --noconfirm --needed base-devel git sudo
                 useradd -m builder
                 echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+                chmod -R 777 /pkg
                 su - builder -c 'git clone https://aur.archlinux.org/${PKGNAME}.git /tmp/pkg && cd /tmp/pkg && makepkg -s --noconfirm && cp *.pkg.tar.* /pkg/'
               " || { echo "⚠️  AUR build failed for $PKGNAME — skipping"; continue; }
 
