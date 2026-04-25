@@ -46,6 +46,28 @@ jobs:
           sudo apt-get install -y aria2 zip
           pip install -q yt-dlp
 
+      - name: Generate YouTube PO token via Deno
+        if: steps.detect.outputs.has_targets == 'true'
+        run: |
+          # Solves YouTube's BotGuard JS challenge automatically — no cookies or secrets needed.
+          # Uses: https://github.com/YunzheZJU/youtube-po-token-generator
+          curl -fsSL https://deno.land/install.sh | sh -s -- --no-modify-path
+          export PATH="$HOME/.deno/bin:$PATH"
+
+          PO_JSON=$(deno run -A npm:youtube-po-token-generator 2>/dev/null || echo "{}")
+          VISITOR_DATA=$(echo "$PO_JSON" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('visitorData',''))" 2>/dev/null || true)
+          PO_TOKEN=$(echo "$PO_JSON" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('poToken',''))" 2>/dev/null || true)
+
+          if [ -n "$VISITOR_DATA" ] && [ -n "$PO_TOKEN" ]; then
+            echo "YT_PO_FLAG=--extractor-args youtube:visitor_data=${VISITOR_DATA};po_token=web+${PO_TOKEN}" >> $GITHUB_ENV
+            echo "✅ PO token generated"
+          else
+            echo "YT_PO_FLAG=" >> $GITHUB_ENV
+            echo "⚠️  PO token generation failed — yt-dlp will try without it"
+          fi
+
       # ── 4. Download everything ───────────────────────────────────────────────
       - name: Download
         if: steps.detect.outputs.has_targets == 'true'
@@ -116,6 +138,7 @@ jobs:
                 -f "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]" \
                 --merge-output-format mp4 \
                 --no-playlist \
+                $YT_PO_FLAG \
                 -o "$YTDIR/%(title)s.%(ext)s" \
                 "$URL" || { echo "⚠️  yt-dlp failed for $URL — skipping"; continue; }
 
@@ -161,29 +184,25 @@ jobs:
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           echo "OUTDIR=$OUTDIR"       >> $GITHUB_ENV
 
-      # ── 5. Push downloaded files to the `downloads` branch ──────────────────
-      - name: Push to downloads branch
+      # ── 5. Push downloaded files to a dedicated timestamped branch ─────────
+      #    Each run → its own orphan branch: dl/YYYY-MM-DD_HH-MM-SS
+      #    Pull a specific download with:
+      #      git pull https://github.com/USER/REPO dl/YYYY-MM-DD_HH-MM-SS
+      - name: Push to timestamped branch
         if: steps.detect.outputs.has_targets == 'true' && env.has_files == 'true'
         run: |
           git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
 
-          # Use or create the `downloads` branch (orphan = no code history)
-          if git ls-remote --exit-code --heads origin downloads &>/dev/null; then
-            git fetch origin downloads
-            git checkout downloads
-            git pull --ff-only origin downloads
-          else
-            echo "📌 Creating orphan 'downloads' branch"
-            git checkout --orphan downloads
-            git rm -rf . --quiet 2>/dev/null || true
-            git clean -fd --quiet  2>/dev/null || true
-          fi
+          DL_BRANCH="dl/$TIMESTAMP"
 
-          # Each run gets its own timestamped folder
-          DEST="$TIMESTAMP"
-          mkdir -p "$DEST"
-          cp -r "$OUTDIR/." "$DEST/"
+          # Create a fresh orphan branch — no connection to any code history
+          git checkout --orphan "$DL_BRANCH"
+          git rm -rf . --quiet 2>/dev/null || true
+          git clean -fd --quiet 2>/dev/null || true
+
+          # Copy files flat into the branch root
+          cp -r "$OUTDIR/." .
 
           # Write a small manifest
           {
@@ -192,12 +211,13 @@ jobs:
             echo "commit_message: |"
             git log -1 --pretty=%B "${{ github.sha }}" | sed 's/^/  /'
             echo "files:"
-            find "$DEST" -type f | sort | sed 's/^/  - /'
-          } > "$DEST/manifest.yml"
+            find . -maxdepth 1 -type f ! -name manifest.yml | sort | sed 's|^\./||;s/^/  - /'
+          } > manifest.yml
 
-          git add "$DEST/"
-          git commit -m "📦 $TIMESTAMP — ${{ github.ref_name }} [skip ci]" \
-            || { echo "Nothing to commit"; exit 0; }
-          git push origin downloads
+          git add .
+          git commit -m "📦 $TIMESTAMP — ${{ github.ref_name }} [skip ci]"
+          git push origin "$DL_BRANCH"
+
           echo ""
-          echo "✅ Files saved to branch 'downloads/$TIMESTAMP'"
+          echo "✅ Saved to branch: $DL_BRANCH"
+          echo "   Pull with: git pull https://github.com/${{ github.repository }} $DL_BRANCH"
