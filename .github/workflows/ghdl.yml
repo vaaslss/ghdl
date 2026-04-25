@@ -1,11 +1,12 @@
 name: ghdl
 
-# Trigger: commit message containing docker:// or http(s):// URLs
+# Trigger: commit message containing docker://, aur://, or http(s):// URLs
 # Examples:
 #   git commit -am "https://example.com/file.zip"
 #   git commit -am "docker://ubuntu:22.04"
+#   git commit -am "aur://yay"
 #   git commit -am "https://youtu.be/dQw4w9WgXcQ"
-#   git commit -am "docker://nginx:latest https://example.com/data.tar"
+#   git commit -am "docker://nginx:latest aur://paru https://example.com/data.tar"
 
 on:
   push:
@@ -32,7 +33,7 @@ jobs:
         id: detect
         run: |
           MSG=$(git log -1 --pretty=%B)
-          if echo "$MSG" | grep -qP '(docker://|https?://)'; then
+          if echo "$MSG" | grep -qP '(docker://|aur://|https?://)'; then
             echo "has_targets=true"  >> $GITHUB_OUTPUT
           else
             echo "has_targets=false" >> $GITHUB_OUTPUT
@@ -127,6 +128,35 @@ jobs:
             split_or_copy "$TARFILE" "$OUTDIR"
             rm -f "$TARFILE"
           done < <(echo "$MSG" | grep -oP 'docker://\S+' || true)
+
+          # ── AUR packages (aur://package-name) ────────────────────────────────
+          while IFS= read -r AUR_REF; do
+            PKGNAME="${AUR_REF#aur://}"
+            [ -z "$PKGNAME" ] && continue
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🏗️  AUR build: $PKGNAME"
+            AURDIR="$WORKDIR/aur_${PKGNAME}"
+            mkdir -p "$AURDIR"
+
+            docker run --rm \
+              -v "$AURDIR:/pkg" \
+              archlinux:latest \
+              bash -c "
+                set -e
+                pacman -Sy --noconfirm archlinux-keyring
+                pacman -Su --noconfirm --needed base-devel git sudo
+                useradd -m builder
+                echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+                su - builder -c 'git clone https://aur.archlinux.org/${PKGNAME}.git /tmp/pkg && cd /tmp/pkg && makepkg -s --noconfirm && cp *.pkg.tar.* /pkg/'
+              " || { echo "⚠️  AUR build failed for $PKGNAME — skipping"; continue; }
+
+            for F in "$AURDIR"/*.pkg.tar.*; do
+              [ -f "$F" ] || continue
+              split_or_copy "$F" "$OUTDIR"
+              rm -f "$F"
+            done
+            rm -rf "$AURDIR"
+          done < <(echo "$MSG" | grep -oP 'aur://\S+' || true)
 
           # ── HTTP/HTTPS URLs ──────────────────────────────────────────────────
           while IFS= read -r RAW_URL; do

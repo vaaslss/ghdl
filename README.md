@@ -16,7 +16,7 @@ No secrets or tokens needed.
 
 ## Usage
 
-Put a URL anywhere in your commit message:
+Put a URL or reference anywhere in your commit message:
 
 ```bash
 # Download a file
@@ -25,11 +25,14 @@ git commit -am "https://example.com/dataset.zip"
 # Pull a Docker image and save as tar.gz
 git commit -am "docker://ubuntu:22.04"
 
+# Build an AUR package
+git commit -am "aur://yay"
+
 # Download a YouTube / media URL via yt-dlp
 git commit -am "https://youtu.be/dQw4w9WgXcQ"
 
 # Mix several targets in one commit
-git commit -am "docker://nginx:latest https://example.com/model.bin https://youtu.be/xyz"
+git commit -am "docker://nginx:latest aur://paru https://example.com/model.bin https://youtu.be/xyz"
 ```
 
 You can also trigger it from the GitHub web UI: edit any file, write the URL as the commit message, and commit directly to `main`.
@@ -41,13 +44,14 @@ You can also trigger it from the GitHub web UI: edit any file, write the URL as 
 | Prefix / pattern | Tool | Output |
 |---|---|---|
 | `docker://image:tag` | `docker save \| gzip` | `docker_image__tag.tar.gz` |
+| `aur://package-name` | `makepkg -s` inside `archlinux:latest` | `package-version.pkg.tar.zst` |
 | Known video site / media extension | `yt-dlp` | `Title.mp4` |
 | Any other `http(s)://` URL | `aria2c` (16 connections) | original filename |
 
-**Large files** (> 90 MB) are automatically split into 90 MB zip parts that GitHub will accept.  
-To reassemble: `zip -s 0 file.zip --out full.zip && unzip full.zip`
+**Large files** (> 90 MB) are automatically split into 90 MB 7-Zip volumes that GitHub will accept.  
+To reassemble: `7za x file.7z.001`
 
-All files land in the `downloads` branch under a `YYYY-MM-DD_HH-MM-SS/` folder, along with a `manifest.yml` that records the source branch, commit SHA, and file list.
+All files land in a timestamped orphan branch (`dl/YYYY-MM-DD_HH-MM-SS`) along with a `manifest.yml` (source branch, commit SHA, file list) and a `sha256sums.txt` for verifying every file and part.
 
 ---
 
@@ -62,6 +66,7 @@ Reddit, Bilibili, VK, Rutube, Streamable, Odysee, Rumble, Kick, and any direct
 ## Notes
 
 - URLs must be publicly accessible (no login required)
-- Multiple URLs/images in one commit are all downloaded in the same run
+- AUR packages are built from source inside an `archlinux:latest` Docker container; any build dependencies are installed automatically via `makepkg -s`
+- Multiple targets in one commit are all processed in the same run
 - The workflow skips its own commits (`[skip ci]`) to avoid loops
-- GitHub's free tier has a 1 GB soft repo limit — the `downloads` branch is orphaned so it doesn't bloat your code history
+- GitHub's free tier has a 1 GB soft repo limit — the `dl/` branches are orphaned so they don't bloat your code history

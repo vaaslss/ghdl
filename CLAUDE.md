@@ -10,8 +10,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. Any push to any branch triggers the workflow.
 2. The workflow parses the latest commit message for `docker://` or `http(s)://` URLs.
-3. Each URL is dispatched to the appropriate tool:
+3. Each URL/reference is dispatched to the appropriate tool:
    - `docker://image:tag` → `docker save | gzip` → `docker_image__tag.tar.gz`
+   - `aur://package-name` → Arch Linux container (`archlinux:latest`) + `makepkg -s` → `.pkg.tar.zst`
    - Known video/media URLs → `yt-dlp` (≤480p mp4)
    - All other `https?://` → `aria2c` (16 parallel connections)
 4. Files > 90 MB are split with `zip -s 90m` (reassemble: `zip -s 0 file.zip --out full.zip && unzip full.zip`).
@@ -41,9 +42,12 @@ git commit -am "https://example.com/dataset.zip"
 # Docker image
 git commit -am "docker://ubuntu:22.04"
 
+# AUR package (builds inside archlinux:latest container, outputs .pkg.tar.zst)
+git commit -am "aur://yay"
+
 # YouTube / media
 git commit -am "https://youtu.be/dQw4w9WgXcQ"
 
 # Multiple targets in one commit
-git commit -am "docker://nginx:latest https://example.com/model.bin"
+git commit -am "docker://nginx:latest aur://paru https://example.com/model.bin"
 ```
