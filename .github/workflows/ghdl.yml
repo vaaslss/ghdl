@@ -1,0 +1,303 @@
+name: ghdl
+
+# Trigger: commit message containing docker://, aur://, or http(s):// URLs
+# Examples:
+#   git commit -am "https://example.com/file.zip"
+#   git commit -am "docker://ubuntu:22.04"
+#   git commit -am "aur://yay"
+#   git commit -am "https://youtu.be/dQw4w9WgXcQ"
+#   git commit -am "docker://nginx:latest aur://paru https://example.com/data.tar"
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  download:
+    # Skip commits we generated ourselves
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ── 1. Checkout with full history so we can push to other branches ──────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Detect whether this commit contains any download targets ──────────
+      - name: Detect targets
+        id: detect
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          if echo "$MSG" | grep -qP '(docker://|aur://|https?://)'; then
+            echo "has_targets=true"  >> $GITHUB_OUTPUT
+          else
+            echo "has_targets=false" >> $GITHUB_OUTPUT
+          fi
+          if echo "$MSG" | grep -qiP '(youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com|twitch\.tv|tiktok\.com|instagram\.com|facebook\.com|fb\.watch|twitter\.com|x\.com|reddit\.com|bilibili\.com|vk\.com|vkvideo\.ru|rutube\.ru|streamable\.com|odysee\.com|rumble\.com|kick\.com|ok\.ru|weibo\.com|douyin\.com|afreecatv\.com|\.(mp4|mkv|webm|flv|avi|mov|m3u8)(\?|\s|$))'; then
+            echo "has_media=true"  >> $GITHUB_OUTPUT
+          else
+            echo "has_media=false" >> $GITHUB_OUTPUT
+          fi
+          echo "YT_PO_FLAG=" >> $GITHUB_ENV
+          echo "Commit message: $MSG"
+
+      # ── 3. Install tools ─────────────────────────────────────────────────────
+      - name: Install tools
+        if: steps.detect.outputs.has_targets == 'true'
+        run: |
+          sudo apt-get install -y aria2 p7zip-full
+          pip install -q yt-dlp
+
+      - name: Generate YouTube PO token via Deno
+        if: steps.detect.outputs.has_targets == 'true' && steps.detect.outputs.has_media == 'true'
+        run: |
+          # Solves YouTube's BotGuard JS challenge automatically — no cookies or secrets needed.
+          # Uses: https://github.com/YunzheZJU/youtube-po-token-generator
+          curl -fsSL https://deno.land/install.sh | sh -s -- --no-modify-path
+          export PATH="$HOME/.deno/bin:$PATH"
+
+          PO_JSON=$(deno run -A npm:youtube-po-token-generator 2>/dev/null || echo "{}")
+          VISITOR_DATA=$(echo "$PO_JSON" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('visitorData',''))" 2>/dev/null || true)
+          PO_TOKEN=$(echo "$PO_JSON" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('poToken',''))" 2>/dev/null || true)
+
+          if [ -n "$VISITOR_DATA" ] && [ -n "$PO_TOKEN" ]; then
+            echo "YT_PO_FLAG=--extractor-args youtube:visitor_data=${VISITOR_DATA};po_token=web+${PO_TOKEN}" >> $GITHUB_ENV
+            echo "✅ PO token generated"
+          else
+            echo "YT_PO_FLAG=" >> $GITHUB_ENV
+            echo "⚠️  PO token generation failed — yt-dlp will try without it"
+          fi
+
+      # ── 4. Download everything ───────────────────────────────────────────────
+      - name: Download
+        if: steps.detect.outputs.has_targets == 'true'
+        run: |
+          set -euo pipefail
+
+          MSG=$(git log -1 --pretty=%B)
+          TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+          OUTDIR="/tmp/ghdl/$TIMESTAMP"
+          WORKDIR="/tmp/ghdl_work"
+          mkdir -p "$OUTDIR" "$WORKDIR"
+
+          # Files larger than 90 MB are split so GitHub accepts them.
+          # Split parts use 7-Zip's multi-volume format (reassemble with: 7za x file.7z.001)
+          SPLIT_LIMIT=$((90 * 1024 * 1024))
+
+          split_or_copy() {
+            local src="$1"
+            local dst_dir="$2"
+            local size base
+            size=$(stat -c%s "$src")
+            base=$(basename "$src")
+            if [ "$size" -gt "$SPLIT_LIMIT" ]; then
+              echo "✂️  $base is $(( size / 1024 / 1024 )) MB — splitting into 90 MB parts"
+              7za a -v90m "$dst_dir/${base}.7z" "$src"
+              echo "   Parts: $(ls "$dst_dir/${base}.7z"* 2>/dev/null | wc -l)"
+            else
+              cp "$src" "$dst_dir/$base"
+            fi
+          }
+
+          # Returns 0 if the URL looks like a media/video URL handled by yt-dlp
+          is_media_url() {
+            echo "$1" | grep -qiP '(youtube\.com|youtu\.be|vimeo\.com|dailymotion\.com|twitch\.tv|tiktok\.com|instagram\.com|facebook\.com|fb\.watch|twitter\.com|x\.com|reddit\.com|bilibili\.com|vk\.com|vkvideo\.ru|rutube\.ru|streamable\.com|odysee\.com|rumble\.com|kick\.com|ok\.ru|weibo\.com|douyin\.com|afreecatv\.com|\.(mp4|mkv|webm|flv|avi|mov|m3u8)(\?|$))'
+          }
+
+          # ── Docker images (docker://image:tag) ───────────────────────────────
+          while IFS= read -r DOCKER_URL; do
+            IMAGE="${DOCKER_URL#docker://}"
+            [ -z "$IMAGE" ] && continue
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🐳 Docker pull: $IMAGE"
+            docker pull "$IMAGE"
+
+            SAFE=$(echo "$IMAGE" | tr '/:.' '___')
+            TARFILE="$WORKDIR/docker_${SAFE}.tar.gz"
+            echo "💾 Saving image as tar.gz …"
+            docker save "$IMAGE" | gzip > "$TARFILE"
+            echo "   Raw size: $(( $(stat -c%s "$TARFILE") / 1024 / 1024 )) MB"
+
+            split_or_copy "$TARFILE" "$OUTDIR"
+            rm -f "$TARFILE"
+          done < <(echo "$MSG" | grep -oP 'docker://\S+' || true)
+
+          # ── AUR packages (aur://package-name) ────────────────────────────────
+          while IFS= read -r AUR_REF; do
+            PKGNAME="${AUR_REF#aur://}"
+            [ -z "$PKGNAME" ] && continue
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🏗️  AUR build: $PKGNAME"
+            AURDIR="$WORKDIR/aur_${PKGNAME}"
+            mkdir -p "$AURDIR"
+
+            docker run --rm \
+              -v "$AURDIR:/pkg" \
+              archlinux:latest \
+              bash -c "
+                set -e
+                pacman -Sy --noconfirm archlinux-keyring
+                pacman -Su --noconfirm --needed base-devel git sudo
+                useradd -m builder
+                echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+                chmod -R 777 /pkg
+                su - builder -c 'git clone https://aur.archlinux.org/${PKGNAME}.git /tmp/pkg && cd /tmp/pkg && makepkg -s --noconfirm && cp *.pkg.tar.* /pkg/'
+              " || { echo "⚠️  AUR build failed for $PKGNAME — skipping"; continue; }
+
+            for F in "$AURDIR"/*.pkg.tar.*; do
+              [ -f "$F" ] || continue
+              split_or_copy "$F" "$OUTDIR"
+              rm -f "$F"
+            done
+            rm -rf "$AURDIR"
+          done < <(echo "$MSG" | grep -oP 'aur://\S+' || true)
+
+          # ── HTTP/HTTPS URLs ──────────────────────────────────────────────────
+          while IFS= read -r RAW_URL; do
+            # Strip trailing punctuation that might come from prose
+            URL=$(echo "$RAW_URL" | sed 's/[.,;:!?)]+$//')
+            [ -z "$URL" ] && continue
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            if is_media_url "$URL"; then
+              # ── Media / video via yt-dlp ─────────────────────────────────────
+              echo "🎬 yt-dlp: $URL"
+              YTDIR="$WORKDIR/yt"
+              mkdir -p "$YTDIR"
+              yt-dlp \
+                -f "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]" \
+                --merge-output-format mp4 \
+                --no-playlist \
+                $YT_PO_FLAG \
+                -o "$YTDIR/%(title)s.%(ext)s" \
+                "$URL" || { echo "⚠️  yt-dlp failed for $URL — skipping"; continue; }
+
+              for F in "$YTDIR"/*; do
+                [ -f "$F" ] || continue
+                split_or_copy "$F" "$OUTDIR"
+                rm -f "$F"
+              done
+            else
+              # ── Generic file via aria2c ──────────────────────────────────────
+              echo "⬇️  aria2c: $URL"
+              DLDIR="$WORKDIR/dl"
+              mkdir -p "$DLDIR"
+              aria2c \
+                --split=16 \
+                --max-connection-per-server=16 \
+                --min-split-size=5M \
+                --console-log-level=notice \
+                --summary-interval=0 \
+                -d "$DLDIR" \
+                "$URL" || { echo "⚠️  aria2c failed for $URL — skipping"; continue; }
+
+              for F in "$DLDIR"/*; do
+                [ -f "$F" ] || continue
+                split_or_copy "$F" "$OUTDIR"
+                rm -f "$F"
+              done
+              rm -rf "$DLDIR"
+            fi
+          done < <(echo "$MSG" | grep -oP 'https?://\S+' || true)
+
+          # ── Generate SHA-256 checksums ───────────────────────────────────────
+          (cd "$OUTDIR" && find . -maxdepth 1 -type f | sort | sed 's|^\./||' | xargs sha256sum > sha256sums.txt)
+
+          # ── Verify we produced something ─────────────────────────────────────
+          FILE_COUNT=$(find "$OUTDIR" -type f ! -name sha256sums.txt | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "⚠️  No files were downloaded — nothing to commit."
+            echo "has_files=false" >> $GITHUB_ENV
+          else
+            echo "✅ Downloaded $FILE_COUNT file(s):"
+            ls -lh "$OUTDIR"
+            echo "has_files=true"    >> $GITHUB_ENV
+          fi
+
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "OUTDIR=$OUTDIR"       >> $GITHUB_ENV
+
+      # ── 5. Push downloaded files to a dedicated timestamped branch ─────────
+      #    Each run → its own orphan branch: dl/YYYY-MM-DD_HH-MM-SS
+      #    Pull a specific download with:
+      #      git pull https://github.com/USER/REPO dl/YYYY-MM-DD_HH-MM-SS
+      # ── 5. Push downloaded files to a dedicated timestamped branch ─────────
+      - name: Push to timestamped branch
+        if: steps.detect.outputs.has_targets == 'true' && env.has_files == 'true'
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+
+          DL_BRANCH="dl/$TIMESTAMP"
+
+          git checkout --orphan "$DL_BRANCH"
+          git rm -rf . --quiet 2>/dev/null || true
+          git clean -fd --quiet 2>/dev/null || true
+
+          cp -r "$OUTDIR/." .
+
+          {
+          echo "source_branch: ${{ github.ref_name }}"
+          echo "trigger_commit: ${{ github.sha }}"
+          echo "commit_message: |"
+          git log -1 --pretty=%B "${{ github.sha }}" | sed 's/^/  /'
+          echo "files:"
+          find . -maxdepth 1 -type f ! -name manifest.yml ! -name sha256sums.txt | sort | sed 's|^\./||;s/^/  - /'
+          } > manifest.yml
+
+          git add .
+          git commit -m "📦 $TIMESTAMP — ${{ github.ref_name }} [skip ci]"
+          git push origin "$DL_BRANCH"
+
+          echo "DL_BRANCH=$DL_BRANCH" >> $GITHUB_ENV
+          echo "✅ Saved to branch: $DL_BRANCH"
+
+        # ── 6. Write raw GitHub content links back to the source branch ─────────
+      - name: Write links to source branch
+        if: steps.detect.outputs.has_targets == 'true' && env.has_files == 'true'
+        run: |
+          git checkout "${{ github.ref_name }}"
+
+          REPO="${{ github.repository }}"
+          BASE_URL="https://raw.githubusercontent.com/${REPO}/${DL_BRANCH}"
+
+          LINKS_FILE="download-links.md"
+
+          {
+          echo "## 📦 Download links — \`$TIMESTAMP\`"
+          echo ""
+          echo "Branch: \`${DL_BRANCH}\`"
+          echo "Triggered by commit: \`${{ github.sha }}\`"
+          echo ""
+          # List every file that was pushed to the dl branch
+          git ls-tree --name-only "origin/${DL_BRANCH}" 2>/dev/null \
+          | grep -v -e '^manifest\.yml$' -e '^sha256sums\.txt$' \
+          | sort \
+          | while IFS= read -r fname; do
+          echo "- [\`${fname}\`](${BASE_URL}/${fname})"
+          echo "  \`\`\`"
+          echo "  ${BASE_URL}/${fname}"
+          echo "  \`\`\`"
+          done
+          echo ""
+          echo "### SHA-256 checksums"
+          echo "\`\`\`"
+          echo "${BASE_URL}/sha256sums.txt"
+          echo "\`\`\`"
+          } > "$LINKS_FILE"
+
+          git add "$LINKS_FILE"
+          git diff --cached --quiet && echo "No changes to links file" && exit 0
+
+          git commit -m "🔗 Links for $TIMESTAMP [skip ci]"
+          git push origin "${{ github.ref_name }}"
+
+          echo ""
+          echo "✅ Links written to ${LINKS_FILE} on ${{ github.ref_name }}"
