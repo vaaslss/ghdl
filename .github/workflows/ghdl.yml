@@ -239,8 +239,8 @@ jobs:
           REPO="${{ github.repository }}"
           BASE_URL="https://raw.githubusercontent.com/${REPO}/${DL_BRANCH}"
 
-          # ── Build the README block from files already in OUTDIR ──────────────
-          README_BLOCK=$(
+          # ── Build README.md ───────────────────────────────────────────────────
+          {
             echo "## 📦 Download links — \`$TIMESTAMP\`"
             echo ""
             echo "Branch: \`${DL_BRANCH}\`  "
@@ -258,32 +258,9 @@ jobs:
             echo "**Checksums:** \`${BASE_URL}/sha256sums.txt\`"
             echo ""
             echo "---"
-          )
+          } > "$OUTDIR/README.md"
 
-          # ── Update README.md on the source branch first ──────────────────────
-          MARKER="<!-- ghdl-links -->"
-
-          if [ ! -f README.md ]; then
-            echo -e "# ghdl downloads\n\n${MARKER}\n" > README.md
-          fi
-
-          # Inject block right after the marker line (keeps older entries below)
-          if grep -q "$MARKER" README.md; then
-            # Use awk to insert after marker, replacing any previous injected block
-            awk -v block="$README_BLOCK" -v marker="$MARKER" '
-              $0 == marker { print; print block; skip=1; next }
-              skip && /^---$/ { skip=0; next }
-              skip { next }
-              { print }
-            ' README.md > README.md.tmp && mv README.md.tmp README.md
-          else
-            printf '\n%s\n%s\n' "$MARKER" "$README_BLOCK" >> README.md
-          fi
-
-          # ── Copy the updated README into OUTDIR so it lands in the dl branch ─
-          cp README.md "$OUTDIR/README.md"
-
-          # ── Create orphan dl branch with files + README ───────────────────────
+          # ── Create orphan dl branch ───────────────────────────────────────────
           git checkout --orphan "$DL_BRANCH"
           git rm -rf . --quiet 2>/dev/null || true
           git clean -fd --quiet 2>/dev/null || true
@@ -305,19 +282,5 @@ jobs:
           git commit -m "📦 $TIMESTAMP — ${{ github.ref_name }} [skip ci]"
           git push origin "$DL_BRANCH"
 
-          echo "DL_BRANCH=$DL_BRANCH" >> $GITHUB_ENV
-          echo "✅ Files + README saved to branch: $DL_BRANCH"
-
-      # ── 6. Commit updated README.md back to the source branch ───────────────
-      - name: Update README on source branch
-        if: steps.detect.outputs.has_targets == 'true' && env.has_files == 'true'
-        run: |
-          git checkout "${{ github.ref_name }}"
-
-          git add README.md
-          git diff --cached --quiet && echo "README unchanged — skipping" && exit 0
-
-          git commit -m "🔗 Links for $TIMESTAMP [skip ci]"
-          git push origin "${{ github.ref_name }}"
-
-          echo "✅ README.md updated on ${{ github.ref_name }}"
+          echo "✅ Saved to branch: $DL_BRANCH"
+          echo "   Pull with: git pull https://github.com/${{ github.repository }} $DL_BRANCH"
