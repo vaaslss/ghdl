@@ -236,7 +236,54 @@ jobs:
           git config user.email "github-actions@github.com"
 
           DL_BRANCH="dl/$TIMESTAMP"
+          REPO="${{ github.repository }}"
+          BASE_URL="https://raw.githubusercontent.com/${REPO}/${DL_BRANCH}"
 
+          # ── Build the README block from files already in OUTDIR ──────────────
+          README_BLOCK=$(
+            echo "## 📦 Download links — \`$TIMESTAMP\`"
+            echo ""
+            echo "Branch: \`${DL_BRANCH}\`  "
+            echo "Triggered by commit: \`${{ github.sha }}\`"
+            echo ""
+            find "$OUTDIR" -maxdepth 1 -type f \
+              ! -name sha256sums.txt \
+              | sort \
+              | while IFS= read -r fpath; do
+                  fname=$(basename "$fpath")
+                  echo "- [\`${fname}\`](${BASE_URL}/${fname})"
+                  echo "  \`${BASE_URL}/${fname}\`"
+                done
+            echo ""
+            echo "**Checksums:** \`${BASE_URL}/sha256sums.txt\`"
+            echo ""
+            echo "---"
+          )
+
+          # ── Update README.md on the source branch first ──────────────────────
+          MARKER="<!-- ghdl-links -->"
+
+          if [ ! -f README.md ]; then
+            echo -e "# ghdl downloads\n\n${MARKER}\n" > README.md
+          fi
+
+          # Inject block right after the marker line (keeps older entries below)
+          if grep -q "$MARKER" README.md; then
+            # Use awk to insert after marker, replacing any previous injected block
+            awk -v block="$README_BLOCK" -v marker="$MARKER" '
+              $0 == marker { print; print block; skip=1; next }
+              skip && /^---$/ { skip=0; next }
+              skip { next }
+              { print }
+            ' README.md > README.md.tmp && mv README.md.tmp README.md
+          else
+            printf '\n%s\n%s\n' "$MARKER" "$README_BLOCK" >> README.md
+          fi
+
+          # ── Copy the updated README into OUTDIR so it lands in the dl branch ─
+          cp README.md "$OUTDIR/README.md"
+
+          # ── Create orphan dl branch with files + README ───────────────────────
           git checkout --orphan "$DL_BRANCH"
           git rm -rf . --quiet 2>/dev/null || true
           git clean -fd --quiet 2>/dev/null || true
@@ -244,12 +291,14 @@ jobs:
           cp -r "$OUTDIR/." .
 
           {
-          echo "source_branch: ${{ github.ref_name }}"
-          echo "trigger_commit: ${{ github.sha }}"
-          echo "commit_message: |"
-          git log -1 --pretty=%B "${{ github.sha }}" | sed 's/^/  /'
-          echo "files:"
-          find . -maxdepth 1 -type f ! -name manifest.yml ! -name sha256sums.txt | sort | sed 's|^\./||;s/^/  - /'
+            echo "source_branch: ${{ github.ref_name }}"
+            echo "trigger_commit: ${{ github.sha }}"
+            echo "commit_message: |"
+            git log -1 --pretty=%B "${{ github.sha }}" | sed 's/^/  /'
+            echo "files:"
+            find . -maxdepth 1 -type f \
+              ! -name manifest.yml ! -name sha256sums.txt ! -name README.md \
+              | sort | sed 's|^\./||;s/^/  - /'
           } > manifest.yml
 
           git add .
@@ -257,47 +306,18 @@ jobs:
           git push origin "$DL_BRANCH"
 
           echo "DL_BRANCH=$DL_BRANCH" >> $GITHUB_ENV
-          echo "✅ Saved to branch: $DL_BRANCH"
+          echo "✅ Files + README saved to branch: $DL_BRANCH"
 
-        # ── 6. Write raw GitHub content links back to the source branch ─────────
-      - name: Write links to source branch
+      # ── 6. Commit updated README.md back to the source branch ───────────────
+      - name: Update README on source branch
         if: steps.detect.outputs.has_targets == 'true' && env.has_files == 'true'
         run: |
           git checkout "${{ github.ref_name }}"
 
-          REPO="${{ github.repository }}"
-          BASE_URL="https://raw.githubusercontent.com/${REPO}/${DL_BRANCH}"
-
-          LINKS_FILE="download-links.md"
-
-          {
-          echo "## 📦 Download links — \`$TIMESTAMP\`"
-          echo ""
-          echo "Branch: \`${DL_BRANCH}\`"
-          echo "Triggered by commit: \`${{ github.sha }}\`"
-          echo ""
-          # List every file that was pushed to the dl branch
-          git ls-tree --name-only "origin/${DL_BRANCH}" 2>/dev/null \
-          | grep -v -e '^manifest\.yml$' -e '^sha256sums\.txt$' \
-          | sort \
-          | while IFS= read -r fname; do
-          echo "- [\`${fname}\`](${BASE_URL}/${fname})"
-          echo "  \`\`\`"
-          echo "  ${BASE_URL}/${fname}"
-          echo "  \`\`\`"
-          done
-          echo ""
-          echo "### SHA-256 checksums"
-          echo "\`\`\`"
-          echo "${BASE_URL}/sha256sums.txt"
-          echo "\`\`\`"
-          } > "$LINKS_FILE"
-
-          git add "$LINKS_FILE"
-          git diff --cached --quiet && echo "No changes to links file" && exit 0
+          git add README.md
+          git diff --cached --quiet && echo "README unchanged — skipping" && exit 0
 
           git commit -m "🔗 Links for $TIMESTAMP [skip ci]"
           git push origin "${{ github.ref_name }}"
 
-          echo ""
-          echo "✅ Links written to ${LINKS_FILE} on ${{ github.ref_name }}"
+          echo "✅ README.md updated on ${{ github.ref_name }}"
