@@ -1,14 +1,14 @@
-## 📦 Download links — `2026-04-28_00-40-29`
+## 📦 Download links — `2026-04-29_16-03-34`
 
-Branch: `dl/2026-04-28_00-40-29`
-Triggered by commit: `8fd2ba0d48467797e6284da5a55f44422d94e0ba`
+Branch: `dl/2026-04-29_16-03-34`
+Triggered by commit: `ffa081482fce4fc3aad75341668b5171d4e6c1f8`
 
-- [`v2rayN-linux-64.deb`](https://raw.githubusercontent.com/Emadshirzad/ghdl/dl/2026-04-28_00-40-29/v2rayN-linux-64.deb)
+- [`slipnet-windows-amd64.exe`](https://raw.githubusercontent.com/mk990/ghdl/dl/2026-04-29_16-03-34/slipnet-windows-amd64.exe)
   ```
-  https://raw.githubusercontent.com/Emadshirzad/ghdl/dl/2026-04-28_00-40-29/v2rayN-linux-64.deb
+  https://raw.githubusercontent.com/mk990/ghdl/dl/2026-04-29_16-03-34/slipnet-windows-amd64.exe
   ```
 
 ### SHA-256 checksums
 ```
-https://raw.githubusercontent.com/Emadshirzad/ghdl/dl/2026-04-28_00-40-29/sha256sums.txt
+https://raw.githubusercontent.com/mk990/ghdl/dl/2026-04-29_16-03-34/sha256sums.txt
 ```
