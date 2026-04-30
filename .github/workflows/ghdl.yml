@@ -246,13 +246,25 @@ jobs:
             echo "Branch: \`${DL_BRANCH}\`  "
             echo "Triggered by commit: \`${{ github.sha }}\`"
             echo ""
-            find "$OUTDIR" -maxdepth 1 -type f \
+           find "$OUTDIR" -maxdepth 1 -type f \
               ! -name sha256sums.txt \
+              ! -name README.md \
               | sort \
               | while IFS= read -r fpath; do
                   fname=$(basename "$fpath")
-                  echo "- [\`${fname}\`](${BASE_URL}/${fname})"
-                  echo "  \`${BASE_URL}/${fname}\`"
+                  echo "- \`${fname}\`"
+                done
+            echo ""
+            echo "### Links"
+            echo ""
+            find "$OUTDIR" -maxdepth 1 -type f \
+              ! -name sha256sums.txt \
+              ! -name README.md \
+              | sort \
+              | while IFS= read -r fpath; do
+                  fname=$(basename "$fpath")
+                  echo "\`${BASE_URL}/${fname}\`"
+                  echo ""
                 done
             echo ""
             echo "**Checksums:** \`${BASE_URL}/sha256sums.txt\`"
